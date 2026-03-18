@@ -59,14 +59,16 @@ export async function POST(req: Request) {
         }
         setAllocation(String(body.amount));
         return NextResponse.json({ ok: true, amount: body.amount });
-      case "store-delegation": {
-  if (!body.delegation || !body.smartAccountAddress) {
-    return NextResponse.json(
-      { error: "delegation and smartAccountAddress required" },
-      { status: 400 }
-    );
+  case "store-delegation": {
+  if (!body.smartAccountAddress) {
+    return NextResponse.json({ error: "smartAccountAddress required" }, { status: 400 });
   }
-  storeDelegation(body.delegation, body.smartAccountAddress);
+  storeDelegation({
+    permissionContext: body.permissionContext,
+    delegationManager: body.delegationManager,
+    smartAccountAddress: body.smartAccountAddress,
+    type: body.type ?? "erc7715",
+  });
   return NextResponse.json({ ok: true });
 }
 
