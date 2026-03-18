@@ -64,6 +64,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "smartAccountAddress required" }, { status: 400 });
   }
   storeDelegation({
+    permissions: body.permissions,
     permissionContext: body.permissionContext,
     delegationManager: body.delegationManager,
     smartAccountAddress: body.smartAccountAddress,

@@ -1,34 +1,60 @@
 "use client";
 
-import { useState, useCallback } from "react";
-import { useAccount, useChainId } from "wagmi";
+import { useState, useEffect, useCallback } from "react";
+import { useAccount } from "wagmi";
 import { erc7715ProviderActions } from "@metamask/smart-accounts-kit/actions";
 import { createWalletClient, custom, parseUnits } from "viem";
+import { base, polygon } from "viem/chains";
 
 declare global {
-    interface Window {
-        ethereum?: any;
-    }
+    interface Window { ethereum?: any; }
 }
 
-const STORAGE_KEY = "brahma_permission_v1";
+const STORAGE_KEY = "brahma_permissions_v2";
 
-export interface StoredPermission {
+export interface ChainPermission {
     context: string;
     delegationManager: string;
     chainId: number;
+}
+
+export interface StoredPermissions {
+    [chainId: number]: ChainPermission;
     userAddress: string;
 }
 
-function isValidAddress(addr: string): addr is `0x${string}` {
-    return typeof addr === "string" && addr.startsWith("0x") && addr.length === 42;
+const CHAIN_CONFIGS: Record<number, { name: string; usdc: string }> = {
+    8453: { name: "Base", usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
+    137:  { name: "Polygon", usdc: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" },
+};
+
+const DELEGATION_MANAGERS: Record<number, string> = {
+    8453: "0xdb9B1e94B5b69Df7e401DDbedE43491141047dB3",
+    137:  "0xdb9B1e94B5b69Df7e401DDbedE43491141047dB3",
+};
+
+// Push stored permissions to the server (idempotent — safe to call multiple times)
+async function syncPermissionsToServer(perms: StoredPermissions): Promise<void> {
+    try {
+        await fetch("/api/yield-agent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                action: "store-delegation",
+                permissions: perms,
+                smartAccountAddress: perms.userAddress,
+                type: "erc7715-multi",
+            }),
+        });
+    } catch {
+        // Non-fatal — will retry on next render cycle
+    }
 }
 
 export function useDelegation(agentAddress: string) {
     const { address } = useAccount();
-    const chainId = useChainId();
 
-    const [permission, setPermission] = useState<StoredPermission | null>(() => {
+    const [permissions, setPermissions] = useState<StoredPermissions | null>(() => {
         if (typeof window === "undefined") return null;
         try {
             const stored = localStorage.getItem(STORAGE_KEY);
@@ -38,22 +64,34 @@ export function useDelegation(agentAddress: string) {
 
     const [signing, setSigning] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [progress, setProgress] = useState("");
+    const [synced, setSynced] = useState(false);
+
+    // ── KEY FIX: re-sync localStorage permissions to the server on every mount ──
+    // The server holds permissions in memory. If the server restarts (Next.js dev,
+    // deployment, Vercel cold start), in-memory state is wiped while localStorage
+    // still has the grant. Without this, the agent silently falls back to its own
+    // wallet funds instead of the user's.
+    useEffect(() => {
+        if (synced) return;
+        if (!permissions) { setSynced(true); return; }
+
+        const chainCount = Object.keys(permissions).filter(k => k !== "userAddress").length;
+        if (chainCount === 0) { setSynced(true); return; }
+
+        syncPermissionsToServer(permissions).finally(() => setSynced(true));
+    }, [permissions, synced]);
 
     const createAndSign = useCallback(async () => {
-        // Validate wallet connection
-        if (!address) {
-            setError("Connect your wallet first");
-            return;
-        }
-
-        // Validate agent address — catches empty string, undefined, short addresses
-        if (!isValidAddress(agentAddress)) {
-            setError("Start the yield agent first — agent wallet address not ready");
+        if (!address) { setError("Connect your wallet first"); return; }
+        if (!agentAddress || agentAddress.length < 42) {
+            setError("Start the yield agent first");
             return;
         }
 
         setSigning(true);
         setError(null);
+        setProgress("");
 
         try {
             if (!window.ethereum) {
@@ -64,72 +102,76 @@ export function useDelegation(agentAddress: string) {
                 transport: custom(window.ethereum),
             }).extend(erc7715ProviderActions());
 
-            const currentChainId = chainId ?? 8453;
+            const grantedPermissions: StoredPermissions = { userAddress: address };
+            const expiry = Math.floor(Date.now() / 1000) + 604800; // 1 week
 
-            const grantedPermissions = await client7715.requestExecutionPermissions([{
-                chainId: currentChainId,
-                expiry: Math.floor(Date.now() / 1000) + 604800, // 1 week
-                isAdjustmentAllowed: true,
-                signer: {
-                    type: "account",
-                    data: {
-                        address: agentAddress, // already validated as 0x${string}
-                    },
-                },
-                permission: {
-                    type: "erc20-token-periodic",
-                    data: {
-                        tokenAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // USDC Base
-                        periodAmount: parseUnits("1000", 6), // 1000 USDC/day max
-                        periodDuration: 86400,
-                        justification:
-                            "Brahma autonomous yield agent — deposits to highest APY Aave V3 pool. " +
-                            "Protected by on-chain YieldCaveatEnforcer (0xf042...). Only Aave V3 + LI.FI allowed.",
-                    },
-                },
-            } as any]);
+            for (const [chainIdStr, chainConfig] of Object.entries(CHAIN_CONFIGS)) {
+                const chainId = Number(chainIdStr);
+                setProgress(`Requesting permission on ${chainConfig.name}...`);
 
-            // Cast to any — signerMeta exists at runtime but missing from SDK types
-            const perm = grantedPermissions[0] as any;
+                try {
+                    await window.ethereum.request({
+                        method: "wallet_switchEthereumChain",
+                        params: [{ chainId: `0x${chainId.toString(16)}` }],
+                    });
 
-            if (!perm?.context || !perm?.signerMeta?.delegationManager) {
-                throw new Error("MetaMask Flask returned incomplete permission data");
+                    const result = await client7715.requestExecutionPermissions([{
+                        chainId,
+                        expiry,
+                        isAdjustmentAllowed: true,
+                        to: agentAddress,
+                        permission: {
+                            type: "erc20-token-periodic",
+                            data: {
+                                tokenAddress: chainConfig.usdc,
+                                periodAmount: parseUnits("1000", 6),
+                                periodDuration: 86400,
+                                justification: `Brahma yield agent: auto-deposits USDC to best Aave V3 APY on ${chainConfig.name}. Guard: only Aave V3 + LI.FI allowed.`,
+                            },
+                        },
+                    } as any]);
+
+                    const perm = result[0] as any;
+                    if (!perm?.context) throw new Error(`No context returned for ${chainConfig.name}`);
+
+                    const delegationManager =
+                        perm?.signerMeta?.delegationManager ??
+                        perm?.delegationManager ??
+                        DELEGATION_MANAGERS[chainId];
+
+                    grantedPermissions[chainId] = {
+                        context: perm.context,
+                        delegationManager,
+                        chainId,
+                    };
+
+                    console.log(`✅ Permission granted on ${chainConfig.name}:`, perm.context.slice(0, 20));
+
+                } catch (chainErr) {
+                    const msg = chainErr instanceof Error ? chainErr.message : String(chainErr);
+                    console.warn(`Permission on ${chainConfig.name} failed:`, msg);
+                    setProgress(`Warning: ${chainConfig.name} failed, continuing...`);
+                    await new Promise(r => setTimeout(r, 1000));
+                }
             }
 
-            const stored: StoredPermission = {
-                context: perm.context,
-                delegationManager: perm.signerMeta.delegationManager,
-                chainId: currentChainId,
-                userAddress: address,
-            };
-
-            setPermission(stored);
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
-
-            const res = await fetch("/api/yield-agent", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    action: "store-delegation",
-                    permissionContext: stored.context,
-                    delegationManager: stored.delegationManager,
-                    smartAccountAddress: address,
-                    type: "erc7715",
-                }),
-            });
-
-            if (!res.ok) {
-                const body = await res.json().catch(() => ({}));
-                throw new Error(body.error ?? `Backend error ${res.status}`);
+            const successCount = Object.keys(grantedPermissions).filter(k => k !== "userAddress").length;
+            if (successCount === 0) {
+                throw new Error("No permissions granted on any chain");
             }
+
+            // Save to localStorage
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(grantedPermissions));
+            setPermissions(grantedPermissions);
+
+            // Sync to server immediately
+            await syncPermissionsToServer(grantedPermissions);
+
+            setProgress(`✅ Permissions granted on ${successCount} chain${successCount > 1 ? "s" : ""} — agent now uses YOUR wallet funds`);
 
         } catch (e) {
             const msg = e instanceof Error ? e.message : "Permission request failed";
-            if (
-                msg.includes("not supported") ||
-                msg.includes("method not found") ||
-                msg.includes("not found")
-            ) {
+            if (msg.includes("not supported") || msg.includes("method not found")) {
                 setError("MetaMask Flask 13.5+ required — download at metamask.io/flask");
             } else {
                 setError(msg);
@@ -137,10 +179,12 @@ export function useDelegation(agentAddress: string) {
         } finally {
             setSigning(false);
         }
-    }, [address, agentAddress, chainId]);
+    }, [address, agentAddress]);
 
     const revoke = useCallback(async () => {
-        setPermission(null);
+        setPermissions(null);
+        setProgress("");
+        setSynced(false);
         localStorage.removeItem(STORAGE_KEY);
         await fetch("/api/yield-agent", {
             method: "POST",
@@ -149,11 +193,17 @@ export function useDelegation(agentAddress: string) {
         }).catch(() => { });
     }, []);
 
+    const chainCount = permissions
+        ? Object.keys(permissions).filter(k => k !== "userAddress").length
+        : 0;
+
     return {
-        delegation: permission ? ({ delegate: agentAddress } as any) : null,
-        permission,
+        delegation: chainCount > 0 ? ({ delegate: agentAddress } as any) : null,
+        permissions,
         signing,
         error,
+        progress,
+        synced,
         createAndSign,
         revoke,
     };

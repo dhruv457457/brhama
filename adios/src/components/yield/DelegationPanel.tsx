@@ -1,6 +1,6 @@
 "use client";
 
-import { Shield, CheckCircle, XCircle, Loader, Zap } from "lucide-react";
+import { Shield, CheckCircle, XCircle, Loader, Zap, RefreshCw } from "lucide-react";
 import { useDelegation } from "@/hooks/useDelegation";
 import { useAccount } from "wagmi";
 
@@ -8,9 +8,17 @@ function isValidAddress(addr: string): boolean {
     return typeof addr === "string" && addr.startsWith("0x") && addr.length === 42;
 }
 
-export default function DelegationPanel({ agentAddress }: { agentAddress: string }) {
+export default function DelegationPanel({
+    agentAddress,
+    hasDelegationOnServer,
+}: {
+    agentAddress: string;
+    // Pass state.hasDelegation from YieldAgentState so we can show
+    // whether the server actually has the permissions loaded
+    hasDelegationOnServer?: boolean;
+}) {
     const { isConnected } = useAccount();
-    const { delegation, signing, error, createAndSign, revoke } = useDelegation(agentAddress);
+    const { delegation, signing, error, progress, synced, createAndSign, revoke } = useDelegation(agentAddress);
 
     if (!isConnected) return (
         <Box>
@@ -20,7 +28,6 @@ export default function DelegationPanel({ agentAddress }: { agentAddress: string
         </Box>
     );
 
-    // Catches empty string "" that !!agentAddress would pass
     if (!isValidAddress(agentAddress)) return (
         <Box>
             <p style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center", padding: "12px 0" }}>
@@ -28,6 +35,11 @@ export default function DelegationPanel({ agentAddress }: { agentAddress: string
             </p>
         </Box>
     );
+
+    // Permission is in localStorage but the server lost it (restart / cold start).
+    // The hook will auto-sync on mount, but show a warning until confirmed.
+    const permissionsInLocalStorage = !!delegation;
+    const serverOutOfSync = permissionsInLocalStorage && !hasDelegationOnServer && synced;
 
     return (
         <Box active={!!delegation}>
@@ -66,13 +78,65 @@ export default function DelegationPanel({ agentAddress }: { agentAddress: string
             <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
                 {delegation ? (
                     <>
+                        {/* Server sync warning */}
+                        {serverOutOfSync && (
+                            <div style={{
+                                display: "flex",
+                                alignItems: "flex-start",
+                                gap: 7,
+                                padding: "8px 10px",
+                                background: "rgba(251,191,36,0.08)",
+                                border: "1px solid rgba(251,191,36,0.25)",
+                                borderRadius: 8,
+                            }}>
+                                <RefreshCw style={{ width: 13, height: 13, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+                                <p style={{ fontSize: 10, color: "#fbbf24", lineHeight: 1.5 }}>
+                                    Server restarted — permissions are re-syncing. Agent will use your funds once confirmed.
+                                </p>
+                            </div>
+                        )}
+
+                        {/* Fund source badge — the most important thing to show */}
+                        <div style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            padding: "8px 10px",
+                            background: hasDelegationOnServer
+                                ? "rgba(0,255,224,0.06)"
+                                : "rgba(251,191,36,0.06)",
+                            border: `1px solid ${hasDelegationOnServer ? "rgba(0,255,224,0.15)" : "rgba(251,191,36,0.2)"}`,
+                            borderRadius: 8,
+                        }}>
+                            <div style={{
+                                width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+                                background: hasDelegationOnServer ? "var(--neon-cyan)" : "#fbbf24",
+                                boxShadow: hasDelegationOnServer ? "0 0 6px var(--neon-cyan)" : "none",
+                            }} />
+                            <div>
+                                <p style={{
+                                    fontSize: 11, fontWeight: 700,
+                                    color: hasDelegationOnServer ? "var(--neon-cyan)" : "#fbbf24",
+                                }}>
+                                    {hasDelegationOnServer
+                                        ? "Using YOUR MetaMask funds ✓"
+                                        : "Syncing to server..."}
+                                </p>
+                                <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 1 }}>
+                                    {hasDelegationOnServer
+                                        ? "Agent wallet funds are NOT used"
+                                        : "Agent may temporarily use its own wallet"}
+                                </p>
+                            </div>
+                        </div>
+
                         {/* Active state */}
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                             <CheckCircle style={{ width: 16, height: 16, color: "var(--neon-cyan)", flexShrink: 0, marginTop: 1 }} />
                             <div>
                                 <p style={{ fontSize: 12, fontWeight: 600, color: "var(--neon-cyan)" }}>Permission Active</p>
                                 <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2, lineHeight: 1.5 }}>
-                                    Brahma agent can deposit up to 1000 USDC/day. Funds stay in your MetaMask wallet.
+                                    Agent can deposit up to 1000 USDC/day. Funds stay in your MetaMask wallet until deposited.
                                 </p>
                             </div>
                         </div>
@@ -129,11 +193,9 @@ export default function DelegationPanel({ agentAddress }: { agentAddress: string
                                 Grant Permission
                             </p>
                             <p style={{ fontSize: 10, color: "var(--text-muted)", lineHeight: 1.5, marginBottom: 8 }}>
-                                MetaMask Flask shows a rich UI. One click — no fund movement, no vault needed.
-                                Agent can spend up to 1000 USDC/day for yield.
+                                MetaMask Flask shows a rich UI. One click — agent uses YOUR wallet funds, not its own bot wallet.
                             </p>
 
-                            {/* Agent address preview */}
                             <div style={{ marginBottom: 8, padding: "5px 8px", background: "var(--bg-base)", borderRadius: 6, display: "flex", justifyContent: "space-between" }}>
                                 <span style={{ fontSize: 9, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Agent</span>
                                 <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--neon-cyan-dim)" }}>
@@ -148,6 +210,12 @@ export default function DelegationPanel({ agentAddress }: { agentAddress: string
                                         {error.slice(0, 100)}
                                     </p>
                                 </div>
+                            )}
+
+                            {progress && (
+                                <p style={{ fontSize: 10, color: "var(--neon-cyan)", fontFamily: "var(--font-mono)", marginBottom: 6 }}>
+                                    {progress}
+                                </p>
                             )}
 
                             <button
@@ -171,16 +239,15 @@ export default function DelegationPanel({ agentAddress }: { agentAddress: string
                                 }}
                             >
                                 {signing
-                                    ? <><Loader style={{ width: 13, height: 13, animation: "spin 1s linear infinite" }} /> Waiting for MetaMask Flask...</>
-                                    : <><Zap style={{ width: 13, height: 13 }} /> Grant Advanced Permission</>
+                                    ? <><Loader style={{ width: 13, height: 13, animation: "spin 1s linear infinite" }} /> {progress || "Waiting for MetaMask..."}</>
+                                    : <><Zap style={{ width: 13, height: 13 }} /> Grant Permissions (Base + Polygon)</>
                                 }
                             </button>
                         </div>
 
-                        {/* Benefits */}
                         <div style={{ padding: "8px 10px", background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8 }}>
                             {[
-                                "No fund movement needed",
+                                "Agent uses YOUR MetaMask USDC — not bot wallet",
                                 "On-chain guard rejects unauthorized contracts",
                                 "Revoke anytime in MetaMask",
                                 "Requires MetaMask Flask 13.5+",

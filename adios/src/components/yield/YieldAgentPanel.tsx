@@ -15,11 +15,11 @@ export default function YieldAgentPanel({
   const isLive = !["IDLE", "PAUSED", "ERROR"].includes(state.status);
   const totalUsd = Number(state.totalBalance ?? "0") / 1e6;
   const allocated = Number(state.allocatedAmount ?? "0") / 1e6;
+  const usingUserFunds = !!state.hasDelegation;
 
   const [allocationInput, setAllocationInput] = useState("");
   const [fetching, setFetching] = useState(false);
 
-  // Sync input with current allocation when it changes externally
   useEffect(() => {
     if (allocated > 0) setAllocationInput(allocated.toFixed(6).replace(/\.?0+$/, ""));
   }, [allocated]);
@@ -65,6 +65,40 @@ export default function YieldAgentPanel({
         <div className="hanko">YIELD</div>
       </div>
 
+      {/* Fund source indicator — shown when agent is running */}
+      {isLive && (
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 12px",
+          borderRadius: 8,
+          background: usingUserFunds
+            ? "rgba(0,255,224,0.06)"
+            : "rgba(255,45,120,0.06)",
+          border: `1px solid ${usingUserFunds ? "rgba(0,255,224,0.15)" : "rgba(255,45,120,0.2)"}`,
+        }}>
+          <div style={{
+            width: 7, height: 7, borderRadius: "50%", flexShrink: 0,
+            background: usingUserFunds ? "var(--neon-cyan)" : "var(--neon-pink)",
+            boxShadow: usingUserFunds ? "0 0 6px var(--neon-cyan)" : "none",
+          }} />
+          <div>
+            <p style={{
+              fontSize: 11, fontWeight: 700,
+              color: usingUserFunds ? "var(--neon-cyan)" : "var(--neon-pink)",
+            }}>
+              {usingUserFunds ? "Using YOUR MetaMask funds" : "Using agent bot wallet funds"}
+            </p>
+            <p style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 1 }}>
+              {usingUserFunds
+                ? "ERC-7715 active — your USDC, your aUSDC"
+                : "Grant permissions below to use your MetaMask USDC instead"}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Unified balance */}
       <div style={{
         background: "var(--bg-base)",
@@ -74,7 +108,7 @@ export default function YieldAgentPanel({
       }}>
         <div className="flex items-center justify-between mb-2">
           <span style={{ fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-            Unified Balance
+            {usingUserFunds ? "Your Wallet Balance" : "Agent Wallet Balance"}
           </span>
           <button
             onClick={handleFetchBalances}
@@ -195,8 +229,11 @@ export default function YieldAgentPanel({
         </p>
       </div>
 
-      {/* Fund agent from MetaMask */}
-<DelegationPanel agentAddress={state.agentAddress} />
+      {/* Delegation panel — passes server-side hasDelegation so it can show sync status */}
+      <DelegationPanel
+        agentAddress={state.agentAddress}
+        hasDelegationOnServer={state.hasDelegation}
+      />
 
       {/* Stats */}
       <div className="grid grid-cols-2 gap-2">
@@ -216,8 +253,13 @@ export default function YieldAgentPanel({
         </div>
         <div className="metric-card">
           <p className="metric-label">Mode</p>
-          <p className="metric-value" style={{ color: state.mode === "LIVE" ? "var(--neon-cyan)" : "var(--neon-pink)", fontSize: 11 }}>
-            {state.mode === "LIVE" ? "LIVE" : "SIM"}
+          <p className="metric-value" style={{
+            color: usingUserFunds
+              ? "var(--neon-cyan)"
+              : state.mode === "LIVE" ? "var(--neon-pink)" : "var(--text-muted)",
+            fontSize: 11,
+          }}>
+            {usingUserFunds ? "ERC-7715" : state.mode === "LIVE" ? "LIVE" : "SIM"}
           </p>
         </div>
       </div>
@@ -228,6 +270,7 @@ export default function YieldAgentPanel({
         <ConnRow label="DeFiLlama" value="API" ok />
         <ConnRow label="LI.FI" value="v3.x" ok />
         <ConnRow label="Aave V3" value={isLive ? "Connected" : "Idle"} ok={isLive} />
+        <ConnRow label="ERC-7715" value={usingUserFunds ? "Active" : "—"} ok={usingUserFunds} />
       </div>
 
       {/* Current position */}
