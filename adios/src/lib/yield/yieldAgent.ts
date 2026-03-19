@@ -97,52 +97,6 @@ async function refreshBalances() {
   state.totalBalance = total.toString();
 }
 
-async function getUserUsdcBalance(): Promise<{ chainId: number; balance: bigint }> {
-  if (!userSmartAccountAddress) return { chainId: 8453, balance: 0n };
-
-  let maxBalance = 0n;
-  let bestChainId = 8453;
-
-  for (const chainId of Object.keys(YIELD_CHAINS).map(Number)) {
-    try {
-      const chainConfig = YIELD_CHAINS[chainId];
-      const chain = CHAIN_MAP[chainId];
-      if (!chain) continue;
-
-      const publicCl = createPublicClient({
-        chain,
-        transport: http(PUBLIC_RPC[chainId] ?? chainConfig.rpcUrl),
-      });
-
-      const bal = await publicCl.readContract({
-        address: chainConfig.usdc,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [userSmartAccountAddress],
-      }) as bigint;
-
-      addLog({
-        timestamp: Date.now(),
-        level: "INFO",
-        message: `[ERC-7715] User USDC on ${chainConfig.name}: ${(Number(bal) / 1e6).toFixed(4)}`,
-      });
-
-      if (bal > maxBalance) {
-        maxBalance = bal;
-        bestChainId = chainId;
-      }
-    } catch (e) {
-      addLog({
-        timestamp: Date.now(),
-        level: "WARN",
-        message: `Could not read user balance on chain ${chainId}: ${e instanceof Error ? e.message.slice(0, 60) : "unknown"}`,
-      });
-    }
-  }
-
-  return { chainId: bestChainId, balance: maxBalance };
-}
-
 let interval: ReturnType<typeof setInterval> | null = null;
 
 function addLog(entry: Omit<LogEntry, "id">) {
@@ -194,7 +148,7 @@ export function storeDelegation(data: {
     };
   }
 
-  // KEY FIX 1: permissions are meaningless in DRY_RUN — auto-switch to LIVE.
+  // Permissions are meaningless in DRY_RUN — auto-switch to LIVE.
   // ERC-7715 always operates on real user funds; there is no simulation path for it.
   if (hasActivePermissions() && state.mode === "DRY_RUN") {
     state.mode = "LIVE";
@@ -256,7 +210,7 @@ export async function fetchAgentBalances() {
 }
 
 export function setYieldMode(mode: "DRY_RUN" | "LIVE") {
-  // KEY FIX 2: block switching back to DRY_RUN while permissions are live.
+  // Block switching back to DRY_RUN while permissions are live.
   if (mode === "DRY_RUN" && hasActivePermissions()) {
     addLog({
       timestamp: Date.now(),
@@ -273,70 +227,15 @@ export function setYieldMode(mode: "DRY_RUN" | "LIVE") {
   });
 }
 
-// ── USDC arrival poller ──
-async function waitForUsdcArrival(
-  chainId: number,
-  userAddress: `0x${string}`,
-  expectedAmount: bigint,
-  maxWaitMs = 300_000
-): Promise<void> {
-  const chain = CHAIN_MAP[chainId];
-  const chainConfig = YIELD_CHAINS[chainId];
-  if (!chain || !chainConfig) return;
-
-  const publicCl = createPublicClient({
-    chain,
-    transport: http(PUBLIC_RPC[chainId] ?? chainConfig.rpcUrl),
-  });
-
-  const deadline = Date.now() + maxWaitMs;
-  const minExpected = (expectedAmount * 90n) / 100n;
-
-  addLog({
-    timestamp: Date.now(),
-    level: "INFO",
-    message: `Waiting for USDC on ${chainConfig.name} (up to 5 min)...`,
-  });
-
-  while (Date.now() < deadline) {
-    try {
-      const bal = await publicCl.readContract({
-        address: chainConfig.usdc,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [userAddress],
-      }) as bigint;
-
-      if (bal >= minExpected) {
-        addLog({
-          timestamp: Date.now(),
-          level: "SUCCESS",
-          message: `USDC arrived on ${chainConfig.name}: ${(Number(bal) / 1e6).toFixed(4)} USDC`,
-        });
-        return;
-      }
-
-      addLog({
-        timestamp: Date.now(),
-        level: "INFO",
-        message: `Waiting... ${chainConfig.name}: ${(Number(bal) / 1e6).toFixed(4)} / ${(Number(expectedAmount) / 1e6).toFixed(4)} USDC`,
-      });
-    } catch { /* ignore transient errors */ }
-
-    await new Promise(r => setTimeout(r, 15_000));
-  }
-
-  throw new Error(`USDC did not arrive on ${chainConfig.name} within 5 minutes`);
-}
-
 // ── ERC-7715 Execution Helper ──
 //
 // The AGENT's private key signs the delegation execution call.
 // The DELEGATION MANAGER contract verifies the permission context and
 // pulls USDC from the USER's wallet — the agent's own USDC is never touched.
-// Minimum ETH (in wei) the agent wallet needs on each chain to cover gas for
-// a sendTransactionWithDelegation call. ~0.0005 ETH covers most L2s comfortably.
-const MIN_GAS_BALANCE_WEI = 500_000_000_000_000n; // 0.0005 ETH
+//
+// Since we no longer bridge, only approve + supply txs go through here.
+// Both are cheap: ~60k gas (approve) + ~200k gas (supply) = ~0.0001 ETH on L2s.
+const MIN_GAS_BALANCE_WEI = 500_000_000_000_000n; // 0.0005 ETH — sufficient for approve+supply only
 
 const NATIVE_SYMBOL: Record<number, string> = {
   8453: "ETH",
@@ -345,14 +244,10 @@ const NATIVE_SYMBOL: Record<number, string> = {
   137: "POL",
 };
 
-// Check agent gas balance and throw a clear, actionable error if insufficient.
-// `nativeValue` is the msg.value the tx will send (e.g. LI.FI bridge fee).
-// Total required = MIN_GAS_BALANCE_WEI (for gas) + nativeValue.
 async function assertAgentHasGas(
   chainId: number,
   agentAddress: `0x${string}`,
   publicCl: ReturnType<typeof createPublicClient>,
-  nativeValue = 0n
 ): Promise<void> {
   const chainConfig = YIELD_CHAINS[chainId];
   const symbol = NATIVE_SYMBOL[chainId] ?? "ETH";
@@ -365,28 +260,20 @@ async function assertAgentHasGas(
     return;
   }
 
-  const required = MIN_GAS_BALANCE_WEI + nativeValue;
-
-  if (balance < required) {
+  if (balance < MIN_GAS_BALANCE_WEI) {
     const have = (Number(balance) / 1e18).toFixed(6);
-    const needGas = (Number(MIN_GAS_BALANCE_WEI) / 1e18).toFixed(4);
-    const needVal = (Number(nativeValue) / 1e18).toFixed(6);
-    const needTotal = (Number(required) / 1e18).toFixed(6);
-    const valueNote = nativeValue > 0n
-      ? ` (${needGas} ${symbol} gas reserve + ${needVal} ${symbol} LI.FI bridge fee)`
-      : "";
+    const need = (Number(MIN_GAS_BALANCE_WEI) / 1e18).toFixed(4);
     throw new Error(
       `Agent wallet ${agentAddress.slice(0, 8)}...${agentAddress.slice(-4)} needs ${symbol} on ${chainConfig.name}. ` +
-      `Has ${have} ${symbol}, needs ≥ ${needTotal} ${symbol}${valueNote}. ` +
-      `Fund the agent wallet — your USDC always comes from YOUR MetaMask, this is only for gas + bridge fees.`
+      `Has ${have} ${symbol}, needs ≥ ${need} ${symbol}. ` +
+      `Fund the agent wallet — your USDC always comes from YOUR MetaMask, this is only for gas.`
     );
   }
 
   addLog({
     timestamp: Date.now(),
     level: "INFO",
-    message: `[ERC-7715] Agent gas OK on ${chainConfig.name}: ${(Number(balance) / 1e18).toFixed(6)} ${symbol}` +
-      (nativeValue > 0n ? ` (includes ${(Number(nativeValue) / 1e18).toFixed(6)} ${symbol} bridge fee)` : ""),
+    message: `[ERC-7715] Agent gas OK on ${chainConfig.name}: ${(Number(balance) / 1e18).toFixed(6)} ${symbol}`,
   });
 }
 
@@ -396,7 +283,6 @@ async function executeViaDelegation(
   callData: `0x${string}`,
   label: string,
   privateKey: string,
-  value = 0n           // native token to send as msg.value (e.g. LI.FI bridge fee)
 ): Promise<`0x${string}`> {
   const chain = CHAIN_MAP[chainId];
   if (!chain) throw new Error(`No chain config for chainId ${chainId}`);
@@ -421,8 +307,8 @@ async function executeViaDelegation(
     transport: http(PUBLIC_RPC[chainId] ?? chainConfig.rpcUrl),
   });
 
-  // ── Gas pre-flight: fail fast with a clear message instead of a cryptic RPC error ──
-  await assertAgentHasGas(chainId, agentAccount.address, publicCl, value);
+  // Gas pre-flight check
+  await assertAgentHasGas(chainId, agentAccount.address, publicCl);
 
   addLog({
     timestamp: Date.now(),
@@ -435,17 +321,17 @@ async function executeViaDelegation(
     chain,
     transport: http(PUBLIC_RPC[chainId] ?? chainConfig.rpcUrl),
   }).extend(erc7710WalletActions());
+
+  // Gas limits: approve ~60k, supply ~200k — add 30% buffer
   const FALLBACK_GAS: Record<string, bigint> = {
     approve: 80_000n,
-    bridge: 600_000n,
-    supply: 250_000n,
+    supply: 260_000n,
   };
 
   const fallback =
     label.toLowerCase().includes("approve") ? FALLBACK_GAS.approve :
-      label.toLowerCase().includes("bridge") ? FALLBACK_GAS.bridge :
-        label.toLowerCase().includes("supply") ? FALLBACK_GAS.supply :
-          400_000n;
+      label.toLowerCase().includes("supply") ? FALLBACK_GAS.supply :
+        200_000n;
 
   let gasLimit = fallback;
   try {
@@ -453,9 +339,8 @@ async function executeViaDelegation(
       account: agentAccount,
       to: targetContract,
       data: callData,
-      value: value > 0n ? value : undefined,
     });
-    gasLimit = (est * 130n) / 100n; // 30% buffer
+    gasLimit = (est * 130n) / 100n; // 30% buffer for delegation overhead
     addLog({
       timestamp: Date.now(),
       level: "INFO",
@@ -468,11 +353,12 @@ async function executeViaDelegation(
       message: `[ERC-7715] "${label}" gas estimation failed — using fallback: ${fallback.toLocaleString()} units`,
     });
   }
+
   const txHash = await walletCl.sendTransactionWithDelegation({
     account: agentAccount,
     to: targetContract,
     data: callData,
-    value: value > 0n ? value : undefined,   // native fee (e.g. LI.FI bridge fee)
+    gas: gasLimit,
     chain,
     permissionsContext: perm.context,
     delegationManager: perm.delegationManager as `0x${string}`,
@@ -507,8 +393,7 @@ export function startYieldAgent(config: {
 
   agentPrivateKey = config.privateKey;
 
-  // KEY FIX 3: if permissions were stored before the agent started
-  // (e.g. user granted before clicking Start), boot into LIVE mode.
+  // If permissions were stored before the agent started, boot into LIVE mode.
   if (hasActivePermissions()) {
     state.mode = "LIVE";
   } else {
@@ -548,12 +433,10 @@ export function startYieldAgent(config: {
     addLog({
       timestamp: Date.now(),
       level: "SUCCESS",
-      message: `[ERC-7715] Active for user ${userSmartAccountAddress?.slice(0, 10)}... — ALL fund operations will use USER's MetaMask USDC`,
+      message: `[ERC-7715] Active for user ${userSmartAccountAddress?.slice(0, 10)}... — deposits on whichever chain user has USDC (no bridging)`,
     });
 
-    // ── Startup gas check: warn immediately per chain ──
-    // sendTransactionWithDelegation is signed + gas-paid by the agent wallet
-    // even though USDC comes from the user. Without ETH/POL the tx fails.
+    // Startup gas check per chain
     ; (async () => {
       for (const chainId of Object.keys(activePermissions).map(Number)) {
         const chainConfig = YIELD_CHAINS[chainId];
@@ -591,9 +474,7 @@ export function startYieldAgent(config: {
   const runCycle = async () => {
     if (["BRIDGING", "DEPOSITING", "WITHDRAWING"].includes(state.status)) return;
 
-    // KEY FIX 4: re-evaluate on every cycle.
-    // This picks up permissions that were granted AFTER the agent started,
-    // and keeps the dryRun flag consistent with the current permission state.
+    // Re-evaluate on every cycle — picks up permissions granted after agent started.
     const usingErc7715 = hasActivePermissions();
     const dryRun = !usingErc7715 && state.mode === "DRY_RUN";
 
@@ -634,7 +515,7 @@ export function startYieldAgent(config: {
         });
       }
 
-      // ── DETECT AGENT WALLET POSITION (skip when ERC-7715 active — agent wallet is irrelevant) ──
+      // ── DETECT AGENT WALLET POSITION (skip when ERC-7715 active) ──
       if (!state.currentPosition && !usingErc7715) {
         for (const chainId of Object.keys(YIELD_CHAINS).map(Number)) {
           try {
@@ -663,9 +544,9 @@ export function startYieldAgent(config: {
 
       const currentChainId = state.currentPosition?.chainId ?? null;
 
-      // ── BRIDGE QUOTE for LLM ──
+      // ── BRIDGE QUOTE for LLM (agent wallet path only) ──
       let bridgeCostForLlm = "unknown";
-      if (currentChainId !== null && currentChainId !== best.chainId) {
+      if (!usingErc7715 && currentChainId !== null && currentChainId !== best.chainId) {
         try {
           const stateAlloc = BigInt(state.allocatedAmount ?? "0");
           const stateTotal = BigInt(state.totalBalance ?? "0");
@@ -695,51 +576,106 @@ export function startYieldAgent(config: {
         return;
       }
 
-      const targetChain = YIELD_CHAINS[decision.targetChainId];
-      if (!targetChain) {
-        addLog({ timestamp: Date.now(), level: "ERROR", message: `Unknown target chain: ${decision.targetChainId}` });
-        state.status = "MONITORING";
-        return;
-      }
-
-      // ── SOURCE FUNDS ──
-      let availableAmount: bigint;
-      let sourceChainId: number = currentChainId ?? 8453;
       const allocated = BigInt(state.allocatedAmount ?? "0");
       const DRY_RUN_DEMO_AMOUNT = allocated > 0n ? allocated : 1_000_000n;
       let withdrawTxHash: string | undefined;
 
+      // ── SOURCE FUNDS ──
+      let availableAmount: bigint;
+      let sourceChainId: number = currentChainId ?? 8453;
+
       if (usingErc7715) {
         // ════════════════════════════════════════════════════════
-        // ERC-7715 PATH
-        // Source = user's MetaMask wallet.
-        // Agent never uses its own USDC.
+        // ERC-7715 PATH — NO BRIDGING
+        //
+        // Scan all chains for user USDC. Pick the chain with the
+        // best Aave APY among chains where the user actually has funds.
+        // Deposit directly there — zero bridge, zero bridge fees.
         // ════════════════════════════════════════════════════════
         addLog({
           timestamp: Date.now(),
           level: "INFO",
-          message: `[ERC-7715] Scanning user wallet ${userSmartAccountAddress!.slice(0, 10)}... for USDC`,
+          message: `[ERC-7715] Scanning user wallet ${userSmartAccountAddress!.slice(0, 10)}... for USDC across all chains`,
         });
 
-        const { chainId: userChainId, balance: userBalance } = await getUserUsdcBalance();
-        sourceChainId = userChainId;
-        availableAmount = allocated > 0n && userBalance > allocated ? allocated : userBalance;
+        type ChainOption = { chainId: number; balance: bigint; apy: number; chainName: string };
+        const chainOptions: ChainOption[] = [];
 
-        if (availableAmount === 0n) {
+        for (const chainId of Object.keys(YIELD_CHAINS).map(Number)) {
+          try {
+            const chainConfig = YIELD_CHAINS[chainId];
+            const chain = CHAIN_MAP[chainId];
+            if (!chain) continue;
+
+            const publicCl = createPublicClient({
+              chain,
+              transport: http(PUBLIC_RPC[chainId] ?? chainConfig.rpcUrl),
+            });
+
+            const bal = await publicCl.readContract({
+              address: chainConfig.usdc,
+              abi: ERC20_ABI,
+              functionName: "balanceOf",
+              args: [userSmartAccountAddress!],
+            }) as bigint;
+
+            const pool = actionableYields.find(y => y.chainId === chainId);
+            const apy = pool?.apyTotal ?? 0;
+
+            addLog({
+              timestamp: Date.now(),
+              level: "INFO",
+              message: `[ERC-7715] ${chainConfig.name}: ${(Number(bal) / 1e6).toFixed(4)} USDC | Aave APY: ${apy.toFixed(2)}%`,
+            });
+
+            if (bal > 0n) {
+              chainOptions.push({ chainId, balance: bal, apy, chainName: chainConfig.name });
+            }
+          } catch (e) {
+            addLog({
+              timestamp: Date.now(),
+              level: "WARN",
+              message: `[ERC-7715] Could not check ${YIELD_CHAINS[chainId]?.name}: ${e instanceof Error ? e.message.slice(0, 60) : "unknown"}`,
+            });
+          }
+        }
+
+        if (chainOptions.length === 0) {
           addLog({
             timestamp: Date.now(),
             level: "ERROR",
-            message: "[ERC-7715] No USDC found in user MetaMask wallet — top up USDC first",
+            message: "[ERC-7715] No USDC found in user wallet on any chain — top up USDC first",
           });
           state.status = "MONITORING";
           return;
         }
 
+        // Pick chain with highest APY where user has USDC
+        const best7715 = chainOptions.sort((a, b) => b.apy - a.apy)[0];
+
+        sourceChainId = best7715.chainId;
+        availableAmount = allocated > 0n && best7715.balance > allocated
+          ? allocated
+          : best7715.balance;
+
+        // Override AI decision — always deposit on user's chain, no bridge
+        decision.targetChainId = best7715.chainId;
+
         addLog({
           timestamp: Date.now(),
-          level: "INFO",
-          message: `[ERC-7715] Will use ${(Number(availableAmount) / 1e6).toFixed(4)} USDC from user wallet on ${YIELD_CHAINS[sourceChainId]?.name}`,
+          level: "SUCCESS",
+          message: `[ERC-7715] Best option: ${best7715.chainName} — ${best7715.apy.toFixed(2)}% APY | will deposit ${(Number(availableAmount) / 1e6).toFixed(4)} USDC`,
         });
+
+        if (availableAmount === 0n) {
+          addLog({
+            timestamp: Date.now(),
+            level: "ERROR",
+            message: "[ERC-7715] No USDC available to deposit",
+          });
+          state.status = "MONITORING";
+          return;
+        }
 
       } else if (state.currentPosition && state.currentPosition.chainId !== decision.targetChainId) {
         // ── WITHDRAW from existing agent-wallet position ──
@@ -794,15 +730,21 @@ export function startYieldAgent(config: {
         return;
       }
 
-      // ── BRIDGE (if cross-chain) ──
+      const targetChain = YIELD_CHAINS[decision.targetChainId];
+      if (!targetChain) {
+        addLog({ timestamp: Date.now(), level: "ERROR", message: `Unknown target chain: ${decision.targetChainId}` });
+        state.status = "MONITORING";
+        return;
+      }
+
+      // ── BRIDGE (agent wallet path only — ERC-7715 never bridges) ──
       const fromChainId = state.currentPosition?.chainId ?? sourceChainId;
       let bridgeRoute;
 
-      if (fromChainId !== decision.targetChainId) {
+      if (fromChainId !== decision.targetChainId && !usingErc7715) {
         state.status = "BRIDGING";
 
-        if (!usingErc7715 && dryRun) {
-          // Simulation only
+        if (dryRun) {
           const quote = await bridge.getDryRunQuote(fromChainId, decision.targetChainId, availableAmount);
           addLog({
             timestamp: Date.now(),
@@ -819,92 +761,9 @@ export function startYieldAgent(config: {
             bridgeUsed: quote.bridgeName,
             executionTime: 0,
           };
-
-        } else if (usingErc7715) {
-          // ERC-7715: bridge from user wallet via LI.FI
-          addLog({
-            timestamp: Date.now(),
-            level: "INFO",
-            message: `[ERC-7715] Bridging ${(Number(availableAmount) / 1e6).toFixed(4)} USDC from user wallet via LI.FI`,
-          });
-
-          try {
-            const lifiQuote = await bridge.getRouteForExecution(
-              fromChainId,
-              decision.targetChainId,
-              availableAmount,
-              userSmartAccountAddress!
-            );
-
-            if (!lifiQuote) throw new Error("No LI.FI route found");
-
-            const approveCalldata = encodeFunctionData({
-              abi: ERC20_ABI,
-              functionName: "approve",
-              args: [lifiQuote.approvalAddress as `0x${string}`, availableAmount],
-            });
-
-            await executeViaDelegation(
-              fromChainId,
-              YIELD_CHAINS[fromChainId].usdc,
-              approveCalldata,
-              "Approve USDC → LI.FI",
-              config.privateKey
-            );
-
-            // LI.FI bridge txs often require a native token fee as msg.value.
-            // Parse it from the quote; fall back to 0n if not present.
-            const bridgeNativeValue = lifiQuote.value
-              ? BigInt(lifiQuote.value)
-              : 0n;
-
-            if (bridgeNativeValue > 0n) {
-              addLog({
-                timestamp: Date.now(),
-                level: "INFO",
-                message: `[ERC-7715] Bridge requires ${(Number(bridgeNativeValue) / 1e18).toFixed(6)} ${NATIVE_SYMBOL[fromChainId] ?? "ETH"} native fee (msg.value)`,
-              });
-            }
-
-            const bridgeTxHash = await executeViaDelegation(
-              fromChainId,
-              lifiQuote.to as `0x${string}`,
-              lifiQuote.data as `0x${string}`,
-              "Bridge USDC via LI.FI",
-              config.privateKey,
-              bridgeNativeValue
-            );
-
-            addLog({
-              timestamp: Date.now(),
-              level: "SUCCESS",
-              message: `[ERC-7715] Bridge tx: ${bridgeTxHash.slice(0, 12)}... waiting for arrival on ${YIELD_CHAINS[decision.targetChainId].name}...`,
-            });
-
-            await waitForUsdcArrival(decision.targetChainId, userSmartAccountAddress!, availableAmount);
-
-            bridgeRoute = {
-              fromChainId,
-              toChainId: decision.targetChainId,
-              fromToken: YIELD_CHAINS[fromChainId].usdc,
-              toToken: YIELD_CHAINS[decision.targetChainId].usdc,
-              fromAmount: availableAmount.toString(),
-              estimatedOutput: lifiQuote.estimatedOutput.toString(),
-              bridgeUsed: "LI.FI via ERC-7715",
-              executionTime: 0,
-            };
-
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            addLog({ timestamp: Date.now(), level: "ERROR", message: `[ERC-7715] Bridge failed: ${msg.slice(0, 120)}` });
-            state.status = "MONITORING";
-            return;
-          }
-
         } else {
-          // Normal agent wallet bridge
+          // Live agent wallet bridge
           bridgeRoute = await bridge.executeBridge(fromChainId, decision.targetChainId, availableAmount);
-
           if (!bridgeRoute) {
             addLog({ timestamp: Date.now(), level: "ERROR", message: "Bridge failed — skipping this cycle" });
             state.status = "MONITORING";
@@ -930,7 +789,7 @@ export function startYieldAgent(config: {
           state.status = "MONITORING";
           return;
         }
-        addLog({ timestamp: Date.now(), level: "SUCCESS", message: `Confirmed ${(Number(depositAmount) / 1e6).toFixed(4)} USDC arrived on ${targetChain.name}` });
+        addLog({ timestamp: Date.now(), level: "SUCCESS", message: `Confirmed ${(Number(depositAmount) / 1e6).toFixed(4)} USDC on ${targetChain.name}` });
       }
 
       if (depositAmount > 0n) {
@@ -938,8 +797,9 @@ export function startYieldAgent(config: {
         if (usingErc7715) {
           // ════════════════════════════════════════════════════════
           // ERC-7715 DEPOSIT
-          // approve + supply executed via sendTransactionWithDelegation.
-          // Funds come from user's wallet. aUSDC is minted to the user.
+          // Two txs: approve + supply, both on the SAME chain.
+          // No bridging. User pays gas via agent wallet delegation.
+          // aUSDC is minted directly to the user's address.
           // ════════════════════════════════════════════════════════
           addLog({
             timestamp: Date.now(),
@@ -948,7 +808,7 @@ export function startYieldAgent(config: {
           });
 
           try {
-            // Approve USDC → Aave Pool (user funds via permission)
+            // Step 1: Approve USDC → Aave Pool
             const approveCalldata = encodeFunctionData({
               abi: ERC20_ABI,
               functionName: "approve",
@@ -963,7 +823,7 @@ export function startYieldAgent(config: {
               config.privateKey
             );
 
-            // Supply to Aave — receipt address is the USER, not the agent
+            // Step 2: Supply to Aave — aUSDC minted to USER, not agent
             const supplyCalldata = encodeFunctionData({
               abi: AAVE_V3_POOL_ABI,
               functionName: "supply",
@@ -991,7 +851,7 @@ export function startYieldAgent(config: {
             addLog({
               timestamp: Date.now(),
               level: "SUCCESS",
-              message: `✅ [ERC-7715] ${(Number(depositAmount) / 1e6).toFixed(4)} USDC deposited from user wallet → Aave V3 on ${targetChain.name}. aUSDC minted to ${userSmartAccountAddress!.slice(0, 10)}...`,
+              message: `✅ [ERC-7715] ${(Number(depositAmount) / 1e6).toFixed(4)} USDC deposited → Aave V3 on ${targetChain.name}. aUSDC minted to ${userSmartAccountAddress!.slice(0, 10)}...`,
             });
 
           } catch (e) {

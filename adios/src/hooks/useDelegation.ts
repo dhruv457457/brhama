@@ -3,14 +3,15 @@
 import { useState, useEffect, useCallback } from "react";
 import { useAccount } from "wagmi";
 import { erc7715ProviderActions } from "@metamask/smart-accounts-kit/actions";
-import { createWalletClient, custom, parseUnits } from "viem";
-import { base, polygon } from "viem/chains";
+import { createWalletClient, custom } from "viem";
+import { base } from "viem/chains";
 
 declare global {
     interface Window { ethereum?: any; }
 }
 
-const STORAGE_KEY = "brahma_permissions_v2";
+// v4 forces MetaMask to drop the old cached permissions and ask for new ones
+const STORAGE_KEY = "brahma_permissions_v4";
 
 export interface ChainPermission {
     context: string;
@@ -23,14 +24,13 @@ export interface StoredPermissions {
     userAddress: string;
 }
 
+// Focused strictly on Base for now
 const CHAIN_CONFIGS: Record<number, { name: string; usdc: string }> = {
     8453: { name: "Base", usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" },
-    137:  { name: "Polygon", usdc: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" },
 };
 
 const DELEGATION_MANAGERS: Record<number, string> = {
     8453: "0xdb9B1e94B5b69Df7e401DDbedE43491141047dB3",
-    137:  "0xdb9B1e94B5b69Df7e401DDbedE43491141047dB3",
 };
 
 // Push stored permissions to the server (idempotent — safe to call multiple times)
@@ -67,11 +67,7 @@ export function useDelegation(agentAddress: string) {
     const [progress, setProgress] = useState("");
     const [synced, setSynced] = useState(false);
 
-    // ── KEY FIX: re-sync localStorage permissions to the server on every mount ──
-    // The server holds permissions in memory. If the server restarts (Next.js dev,
-    // deployment, Vercel cold start), in-memory state is wiped while localStorage
-    // still has the grant. Without this, the agent silently falls back to its own
-    // wallet funds instead of the user's.
+    // Re-sync localStorage permissions to the server on every mount
     useEffect(() => {
         if (synced) return;
         if (!permissions) { setSynced(true); return; }
@@ -121,13 +117,18 @@ export function useDelegation(agentAddress: string) {
                         isAdjustmentAllowed: true,
                         to: agentAddress,
                         permission: {
-                            type: "erc20-token-periodic",
+                            // Valid type for custom smart contract enforcers
+                            type: "contract-call",
+                            policies: [
+                                {
+                                    // Your deployed Base enforcer address
+                                    enforcer: "0xca8a95c54c460a564e721f507c216ad6f8b454af",
+                                    terms: "0x"
+                                }
+                            ],
                             data: {
-                                tokenAddress: chainConfig.usdc,
-                                periodAmount: parseUnits("1000", 6),
-                                periodDuration: 86400,
-                                justification: `Brahma yield agent: auto-deposits USDC to best Aave V3 APY on ${chainConfig.name}. Guard: only Aave V3 + LI.FI allowed.`,
-                            },
+                                justification: `Brahma yield agent: auto-deposits USDC to Aave V3. Guarded strictly by YieldCaveatEnforcer on-chain.`,
+                            }
                         },
                     } as any]);
 

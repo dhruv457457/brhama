@@ -9,6 +9,9 @@
 //   fetchQuoteCost()   — lightweight: getQuote only, returns cost for LLM pre-decision
 //   getDryRunQuote()   — full dry-run: getQuote + eth_call simulation
 //
+// NOTE: getRouteForExecution removed — ERC-7715 path no longer bridges.
+// Agent deposits on whichever chain the user already has USDC on.
+//
 // Source: https://docs.li.fi/llms.txt
 
 import {
@@ -192,6 +195,7 @@ export class YieldBridge {
    * Live bridge — getQuote → convertQuoteToRoute → executeRoute.
    * initLiFi is called with the actual fromChainId so the wallet client
    * is on the correct source chain from the start.
+   * Used only for the non-ERC-7715 agent wallet path.
    */
   async executeBridge(
     fromChainId: number,
@@ -260,109 +264,5 @@ export class YieldBridge {
       bridgeUsed: bridgeName,
       executionTime: elapsed,
     };
-  }
-
-  /**
-   * Get a LI.FI route for ERC-7715 manual execution.
-   * Returns the raw tx calldata + native msg.value so the agent can
-   * submit it as a delegation call with the correct ETH attached.
-   *
-   * KEY FIX: LI.FI bridge txs often require a native token fee as msg.value
-   * (e.g. LayerZero messaging fee). The LI.FI SDK types don't expose `value`
-   * on transactionRequest, so we cast to `any` to read it, then normalize to
-   * bigint. Without this, bridgeNativeValue is always 0n and the tx fails with
-   * "total cost exceeds balance" even when the agent has enough ETH for gas.
-   */
-  async getRouteForExecution(
-    fromChainId: number,
-    toChainId: number,
-    amount: bigint,
-    recipient: `0x${string}`
-  ): Promise<{
-    to: string;
-    data: string;
-    approvalAddress: string;
-    estimatedOutput: bigint;
-    value?: bigint;        // native msg.value required by the bridge protocol
-  } | null> {
-    try {
-      const fromChain = YIELD_CHAINS[fromChainId];
-      const toChain = YIELD_CHAINS[toChainId];
-      if (!fromChain || !toChain) return null;
-
-      initLiFi(this.privateKey, fromChainId);
-
-      const { getRoutes, getStepTransaction } = await import("@lifi/sdk");
-
-      const routesResult = await getRoutes({
-        fromChainId,
-        toChainId,
-        fromTokenAddress: fromChain.usdc,
-        toTokenAddress: toChain.usdc,
-        fromAmount: amount.toString(),
-        fromAddress: recipient, // user wallet is sender
-        toAddress: recipient, // user wallet receives on target chain
-        options: {
-          slippage: 0.03,
-          integrator: process.env.LIFI_INTEGRATOR ?? "brahma",
-        },
-      });
-
-      const route = routesResult.routes[0];
-      if (!route?.steps?.[0]) return null;
-
-      const step = route.steps[0];
-      const tx = await getStepTransaction(step);
-
-      if (!tx.transactionRequest?.to || !tx.transactionRequest?.data) {
-        this.log("ERROR", "getRouteForExecution: no transactionRequest in step");
-        return null;
-      }
-
-      // Cast to any — LI.FI SDK types omit `value` but it is present at runtime
-      // when the bridge protocol (e.g. LayerZero, Stargate) requires a native fee.
-      const rawTx = tx.transactionRequest as {
-        to?: string;
-        data?: string;
-        value?: string | bigint | number;
-      };
-
-      // Normalize value: handles hex ("0x38d7ea4c68000"), decimal string, number, bigint, or absent.
-      let nativeValue: bigint | undefined;
-      if (rawTx.value != null) {
-        const raw = rawTx.value.toString();
-        // Treat "0x", "0x0", "0", and "" as no fee
-        if (raw !== "" && raw !== "0x" && raw !== "0x0" && raw !== "0") {
-          try {
-            nativeValue = BigInt(raw);
-          } catch {
-            // Malformed value — treat as no fee
-            this.log("WARN", `getRouteForExecution: could not parse value "${raw}" — treating as 0`);
-          }
-        }
-      }
-
-      this.log(
-        "INFO",
-        `[ERC-7715] LI.FI route — bridge fee (msg.value): ${nativeValue != null
-          ? `${(Number(nativeValue) / 1e18).toFixed(8)} ETH`
-          : "none"
-        } | est. output: ${(Number(route.toAmountMin ?? route.toAmount) / 1e6).toFixed(4)} USDC`
-      );
-
-      return {
-        to: rawTx.to as string,
-        data: rawTx.data as string,
-        approvalAddress: step.estimate.approvalAddress,
-        estimatedOutput: BigInt(route.toAmountMin ?? route.toAmount),
-        value: nativeValue,
-      };
-    } catch (e) {
-      this.log(
-        "ERROR",
-        `getRouteForExecution failed: ${e instanceof Error ? e.message.slice(0, 80) : "unknown"}`
-      );
-      return null;
-    }
   }
 }
