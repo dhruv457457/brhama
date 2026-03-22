@@ -5,7 +5,8 @@
 Pact uses **ERC-7715 delegated permissions** and **LangGraph AI agents** to automatically analyze GitHub contributions and pay contributors in USDC — without the repo owner touching their wallet .
 
 ## How It Works
-
+ 
+ 
 ```
 GitHub PR merged
     ↓
