@@ -1,0 +1,118 @@
+export const CONTRIBUTOR_REGISTRY_ABI = [
+  {
+    inputs: [{ name: "_agentAddress", type: "address" }],
+    stateMutability: "nonpayable",
+    type: "constructor",
+  },
+  {
+    inputs: [],
+    name: "agentAddress",
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "", type: "address" }],
+    name: "contributors",
+    outputs: [
+      { name: "totalEarned", type: "uint256" },
+      { name: "totalPayouts", type: "uint256" },
+      { name: "reputationScore", type: "uint256" },
+      { name: "lastPaidAt", type: "uint256" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "", type: "address" }],
+    name: "githubHandles",
+    outputs: [{ name: "", type: "string" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "handle", type: "string" }],
+    name: "getWalletForHandle",
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "contributor", type: "address" }],
+    name: "getReputation",
+    outputs: [
+      { name: "totalEarned", type: "uint256" },
+      { name: "totalPayouts", type: "uint256" },
+      { name: "reputationScore", type: "uint256" },
+      { name: "lastPaidAt", type: "uint256" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "contributor", type: "address" },
+      { name: "amountUsdc", type: "uint256" },
+      { name: "aiScore", type: "uint256" },
+      { name: "txHash", type: "bytes32" },
+    ],
+    name: "logPayout",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "repoName", type: "string" },
+      { name: "monthlyBudget", type: "uint256" },
+    ],
+    name: "registerProject",
+    outputs: [{ name: "", type: "bytes32" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "githubHandle", type: "string" }],
+    name: "registerContributor",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "", type: "string" }],
+    name: "walletByHandle",
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "projectId", type: "bytes32" },
+      { indexed: true, name: "owner", type: "address" },
+      { indexed: false, name: "repoName", type: "string" },
+    ],
+    name: "ProjectRegistered",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "contributor", type: "address" },
+      { indexed: false, name: "amount", type: "uint256" },
+      { indexed: false, name: "score", type: "uint256" },
+      { indexed: false, name: "txHash", type: "bytes32" },
+    ],
+    name: "PayoutLogged",
+    type: "event",
+  },
+  {
+    anonymous: false,
+    inputs: [
+      { indexed: true, name: "wallet", type: "address" },
+      { indexed: false, name: "githubHandle", type: "string" },
+    ],
+    name: "ContributorRegistered",
+    type: "event",
+  },
+] as const;
