@@ -1,0 +1,21 @@
+{
+  "name": "pact",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI agents that autonomously reward open source contributors via MetaMask ERC-7715 permissions",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace=apps/web",
+    "dev:agents": "npm run dev --workspace=apps/agents",
+    "dev:onchain": "npm run dev --workspace=packages/onchain-service",
+    "build:contracts": "npm run build --workspace=packages/contracts",
+    "deploy:contracts": "npm run deploy --workspace=packages/contracts",
+    "test:contracts": "npm run test --workspace=packages/contracts"
+  },
+  "dependencies": {
+    "@metamask/smart-accounts-kit": "^0.4.0-beta.1"
+  }
+}
