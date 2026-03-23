@@ -52,7 +52,6 @@ const PERIOD_ENFORCER_ABI = [
     ],
     outputs: [{ name: "spent", type: "uint256" }],
     stateMutability: "view",
-    type: "function",
   },
 ] as const;
 
