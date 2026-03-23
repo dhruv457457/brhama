@@ -13,7 +13,9 @@ import {
   getActivePermission,
   revokeStoredPermission,
 } from "../services/permissionStore.js";
-import { publicClient } from "../config.js";
+import { publicClient, agentAccount, CONFIG } from "../config.js";
+import { createWalletClient, http, parseUnits, encodeFunctionData } from "viem";
+import { sepolia } from "viem/chains";
 
 const router = Router();
 
@@ -213,6 +215,83 @@ router.post("/verify-agents", async (req, res) => {
     }
 
     res.json({ results });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── USDC Faucet (Testnet Only) ──
+
+const MINT_ABI = [{
+  name: "mint",
+  type: "function",
+  inputs: [
+    { name: "to", type: "address" },
+    { name: "amount", type: "uint256" },
+  ],
+  outputs: [],
+  stateMutability: "nonpayable",
+}] as const;
+
+// Mint test USDC to any address (max 5000 per request)
+router.post("/faucet", async (req, res) => {
+  try {
+    const { toAddress, amount } = req.body;
+    if (!toAddress) {
+      return res.status(400).json({ error: "toAddress is required" });
+    }
+
+    const mintAmount = Math.min(parseFloat(amount) || 1000, 5000);
+    const amountWei = parseUnits(mintAmount.toString(), 6);
+
+    const walletClient = createWalletClient({
+      account: agentAccount,
+      chain: sepolia,
+      transport: http(CONFIG.sepoliaRpcUrl),
+    });
+
+    const txHash = await walletClient.writeContract({
+      address: CONFIG.usdcAddress,
+      abi: MINT_ABI,
+      functionName: "mint",
+      args: [toAddress as `0x${string}`, amountWei],
+    });
+
+    console.log(`[Faucet] Minted ${mintAmount} USDC to ${toAddress}: ${txHash}`);
+
+    res.json({
+      success: true,
+      txHash,
+      amount: mintAmount,
+      toAddress,
+    });
+  } catch (err: any) {
+    console.error("[Faucet] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get USDC balance for an address
+router.get("/balance/:address", async (req, res) => {
+  try {
+    const balance = await publicClient.readContract({
+      address: CONFIG.usdcAddress,
+      abi: [{
+        name: "balanceOf",
+        type: "function",
+        inputs: [{ name: "account", type: "address" }],
+        outputs: [{ name: "", type: "uint256" }],
+        stateMutability: "view",
+      }],
+      functionName: "balanceOf",
+      args: [req.params.address as `0x${string}`],
+    });
+
+    res.json({
+      address: req.params.address,
+      balance: (Number(balance) / 1e6).toString(),
+      raw: balance.toString(),
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

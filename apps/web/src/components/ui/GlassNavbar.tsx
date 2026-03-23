@@ -10,6 +10,7 @@ export function GlassNavbar() {
   const links = [
     { href: "/dashboard", label: "Economy", icon: "E" },
     { href: "/permissions", label: "Permissions", icon: "P" },
+    { href: "/faucet", label: "Faucet", icon: "$" },
   ];
 
   return (
@@ -18,11 +19,11 @@ export function GlassNavbar() {
         <div className="flex items-center gap-8">
           <Link href="/" className="flex items-center gap-2.5 group">
             <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-500/25 to-teal-500/10 border border-purple-500/25 flex items-center justify-center group-hover:border-purple-500/40 transition-all group-hover:shadow-[0_0_20px_rgba(124,58,237,0.15)]">
-              <span className="text-purple-400 font-black text-sm">P</span>
+              <span className="text-purple-400 font-black text-sm">V</span>
             </div>
             <div className="flex flex-col">
               <span className="font-black text-sm tracking-tight text-white/90 leading-none">
-                Pact
+                Vela
               </span>
               <span className="text-[8px] text-white/15 font-mono tracking-wider leading-none mt-0.5">
                 AI AGENT ECONOMY
